@@ -17,13 +17,8 @@ func setProcGroup(cmd *exec.Cmd) {
 	// Windows does not support Setpgid; processes are managed individually.
 }
 
-func killCmd(cmd *exec.Cmd) {
+func killCmd(cmd *exec.Cmd, graceful bool) {
 	if cmd == nil || cmd.Process == nil {
-		return
-	}
-
-	// On Windows, Process.Kill is the only reliable way to terminate.
-	if err := cmd.Process.Kill(); err != nil {
 		return
 	}
 
@@ -32,6 +27,21 @@ func killCmd(cmd *exec.Cmd) {
 		cmd.Wait()
 		close(done)
 	}()
+
+	if graceful {
+		// Windows has no SIGQUIT; send interrupt and wait for graceful timeout
+		log.Printf("sending interrupt, waiting up to %s for graceful shutdown...", gracefulTimeout)
+		cmd.Process.Signal(os.Interrupt)
+
+		select {
+		case <-done:
+			return
+		case <-time.After(gracefulTimeout):
+			log.Printf("graceful shutdown timed out, killing process...")
+		}
+	}
+
+	cmd.Process.Kill()
 
 	select {
 	case <-done:

@@ -12,23 +12,29 @@ import (
 )
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: gitmon [-i seconds] command [args...]\n")
+	fmt.Fprintf(os.Stderr, "Usage: gitmon [options] command [args...]\n")
 	fmt.Fprintf(os.Stderr, "\nPeriodically git fetch, pull on changes, and restart the command.\n")
 	fmt.Fprintf(os.Stderr, "\nOptions:\n")
-	fmt.Fprintf(os.Stderr, "  -i seconds   Poll interval in seconds (default: 30)\n")
+	fmt.Fprintf(os.Stderr, "  -i seconds              Poll interval in seconds (default: 30)\n")
+	fmt.Fprintf(os.Stderr, "  -g, --graceful           Send SIGQUIT before SIGTERM to allow graceful shutdown\n")
+	fmt.Fprintf(os.Stderr, "  -G, --graceful-timeout dur  Time to wait for graceful shutdown (default: 60m, implies -g)\n")
 	os.Exit(1)
 }
+
+var gracefulTimeout time.Duration
 
 func main() {
 	log.SetPrefix("[gitmon] ")
 	log.SetFlags(log.Ltime)
 
 	interval := 30
+	graceful := false
+	gracefulTimeout = 60 * time.Minute
 	args := os.Args[1:]
 
-	// Parse -i flag
 	for len(args) > 0 {
-		if args[0] == "-i" {
+		switch args[0] {
+		case "-i":
 			if len(args) < 2 {
 				usage()
 			}
@@ -38,19 +44,38 @@ func main() {
 			}
 			interval = v
 			args = args[2:]
-		} else if args[0] == "-h" || args[0] == "--help" {
+		case "-g", "--graceful":
+			graceful = true
+			args = args[1:]
+		case "-G", "--graceful-timeout":
+			if len(args) < 2 {
+				usage()
+			}
+			d, err := time.ParseDuration(args[1])
+			if err != nil || d <= 0 {
+				log.Fatalf("invalid shutdown timeout: %s", args[1])
+			}
+			gracefulTimeout = d
+			graceful = true
+			args = args[2:]
+		case "-h", "--help":
 			usage()
-		} else {
-			break
+		default:
+			goto done
 		}
 	}
+done:
 
 	if len(args) == 0 {
 		usage()
 	}
 
 	cmdArgs := args
-	log.Printf("monitoring every %ds, running: %s", interval, strings.Join(cmdArgs, " "))
+	if graceful {
+		log.Printf("monitoring every %ds (graceful shutdown: %s), running: %s", interval, gracefulTimeout, strings.Join(cmdArgs, " "))
+	} else {
+		log.Printf("monitoring every %ds, running: %s", interval, strings.Join(cmdArgs, " "))
+	}
 
 	// Start the command
 	cmd := startCmd(cmdArgs)
@@ -66,17 +91,18 @@ func main() {
 		select {
 		case <-sigs:
 			log.Printf("shutting down...")
-			killCmd(cmd)
+			killCmd(cmd, graceful)
 			os.Exit(0)
 
 		case <-ticker.C:
 			if changed := checkForChanges(); changed {
-				log.Printf("changes detected, pulling and restarting...")
+				log.Printf("changes detected, stopping process before pull...")
+				killCmd(cmd, graceful)
 				if err := gitPull(); err != nil {
 					log.Printf("git pull failed: %v", err)
+					cmd = startCmd(cmdArgs)
 					continue
 				}
-				killCmd(cmd)
 				cmd = startCmd(cmdArgs)
 			}
 		}
