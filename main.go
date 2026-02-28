@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -58,7 +57,7 @@ func main() {
 
 	// Handle signals
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, append([]os.Signal{os.Interrupt}, shutdownSignals()...)...)
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
@@ -88,7 +87,7 @@ func startCmd(args []string) *exec.Cmd {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		log.Fatalf("failed to start command: %v", err)
@@ -100,35 +99,6 @@ func startCmd(args []string) *exec.Cmd {
 	go cmd.Wait()
 
 	return cmd
-}
-
-func killCmd(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		// Process already exited
-		return
-	}
-
-	// Kill the entire process group
-	syscall.Kill(-pgid, syscall.SIGTERM)
-
-	// Give it a moment to exit gracefully
-	done := make(chan struct{})
-	go func() {
-		cmd.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		log.Printf("process did not exit gracefully, sending SIGKILL")
-		syscall.Kill(-pgid, syscall.SIGKILL)
-	}
 }
 
 func checkForChanges() bool {
